@@ -30,6 +30,7 @@ setup(
             'find_object = loki_object_follower.find_object:main',
             'rotate_robot = loki_object_follower.rotate_robot:main',
             'debug_viz = loki_object_follower.debug_viz:main',
+            'debug_viz_server = loki_object_follower.debug_viz_server:main',
         ],
     },
 )
