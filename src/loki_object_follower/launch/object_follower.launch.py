@@ -23,6 +23,11 @@ def generate_launch_description():
         default_value='/dev/ttyACM0',
         description='USB port connected to the OpenCR board')
 
+    camera_params_arg = DeclareLaunchArgument(
+        'camera_params',
+        default_value='./v4l2_camera.yaml',
+        description='v4l2_camera parameter file (relative paths resolve from the cwd)')
+
     # With the LiDAR: the stock bringup (requires TURTLEBOT3_MODEL and LDS_MODEL).
     bringup_with_lidar = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -65,15 +70,19 @@ def generate_launch_description():
         output='screen',
     )
 
-    # PLACEHOLDER: camera node.
-    # find_object subscribes to /camera/image_raw/compressed (sensor_msgs/CompressedImage).
-    # Swap in the real camera driver once it's decided, e.g.:
-    # camera_node = Node(
-    #     package='<camera_package>',
-    #     executable='<camera_executable>',
-    #     name='camera',
-    #     output='screen',
-    # )
+    # Publishes /camera/image_raw; the /compressed variant that find_object
+    # subscribes to comes from image_transport (compressed_image_transport).
+    camera_node = Node(
+        package='v4l2_camera',
+        executable='v4l2_camera_node',
+        name='v4l2_camera',
+        output='screen',
+        parameters=[LaunchConfiguration('camera_params')],
+        remappings=[
+            ('image_raw', '/camera/image_raw'),
+            ('camera_info', '/camera/camera_info'),
+        ],
+    )
 
     return LaunchDescription([
         use_lidar_arg,
@@ -82,5 +91,6 @@ def generate_launch_description():
         *bringup_no_lidar,
         find_object_node,
         rotate_robot_node,
-        # camera_node,
+        camera_params_arg,
+        camera_node,
     ])
