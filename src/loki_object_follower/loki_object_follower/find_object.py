@@ -255,6 +255,9 @@ class FindObject(Node):
         # Show OpenCV debug windows (requires a display).
         self.display = self.declare_parameter('display', False).value
 
+        self.image_topic = self.declare_parameter(
+            'image_topic', '/image_raw/compressed').value
+
         self.state = State()
 
         if self.display:
@@ -263,7 +266,7 @@ class FindObject(Node):
 
         self.image_sub = self.create_subscription(
             CompressedImage,
-            '/camera/image_raw/compressed',
+            self.image_topic,
             self.image_callback,
             qos_profile_sensor_data)
         self.object_pub = self.create_publisher(Point, '/object', 10)
