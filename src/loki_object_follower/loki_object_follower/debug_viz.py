@@ -26,6 +26,13 @@ class DebugViz(Node):
             self.get_logger().warn('Could not decode compressed image')
             return
 
+        if msg.point.z < 0:
+            cv2.putText(frame, 'no object', (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8, (0, 0, 255), 2)
+            cv2.imshow(WINDOW, frame)
+            cv2.waitKey(1)
+            return
+
         center = (int(msg.point.x), int(msg.point.y))
         radius = int(msg.point.z)
         cv2.circle(frame, center, radius, (0, 255, 0), 3)

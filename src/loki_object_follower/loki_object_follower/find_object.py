@@ -13,6 +13,7 @@ from sensor_msgs.msg import CompressedImage
 
 CIRCLE_FIT_THRESHOLD = 0.5
 DISTANCE_THRESHOLD = 500
+NO_OBJECT_POINT = Point(x=-1.0, y=-1.0, z=-1.0)  # negative radius means "no object"
 
 
 class Status(Enum):
@@ -244,8 +245,9 @@ class FindObject(Node):
     normalized to [-1, 1] (0, 0 is the image center, +x is right, +y is up)
     and z is its radius in pixels (0 when no radius is known).
 
-    Also publishes an ImagePoint on /debug_viz with the received compressed
-    image and the object's raw pixel center (x, y) and radius (z).
+    Also publishes an ImagePoint on /debug_viz for every received image, with
+    the compressed image and the object's raw pixel center (x, y) and radius
+    (z). When no object is found the point is (-1, -1, -1).
     """
 
     def __init__(self):
@@ -277,7 +279,8 @@ class FindObject(Node):
         point = self.detect_object(frame)
         if point is not None:
             self.object_pub.publish(normalize_point(frame, point))
-            self.debug_viz_pub.publish(ImagePoint(image=msg, point=point))
+        self.debug_viz_pub.publish(
+            ImagePoint(image=msg, point=NO_OBJECT_POINT if point is None else point))
 
         if prev_status != self.state.status:
             self.get_logger().info(f'Status: {self.state.status}')

@@ -42,6 +42,10 @@ def read_frame(sock):
 
 
 def draw(image, x, y, radius):
+    if radius < 0:  # the robot sends a negative radius when no object is detected
+        cv2.putText(image, 'no object', (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8, (0, 0, 255), 2)
+        return
     center = (int(x), int(y))
     radius = int(radius)
     cv2.circle(image, center, radius, (0, 255, 0), 3)
