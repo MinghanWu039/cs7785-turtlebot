@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'find_object = loki_object_follower.find_object:main',
             'rotate_robot = loki_object_follower.rotate_robot:main',
+            'debug_viz = loki_object_follower.debug_viz:main',
         ],
     },
 )
