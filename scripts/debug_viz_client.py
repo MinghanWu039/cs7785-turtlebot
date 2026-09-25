@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Display the detected object streamed by the robot's debug_viz_server node.
+Display the detected object and foreground mask streamed by the robot's debug_viz_server node.
 
 Needs only opencv-python and numpy, no ROS. Typical use over an ssh tunnel:
 
@@ -19,7 +19,10 @@ import numpy as np
 # Must match src/loki_object_follower/loki_object_follower/debug_viz_server.py.
 HEADER = struct.Struct('>I')
 POINT = struct.Struct('>fff')
+IMAGE = b'I'
+MASK = b'M'
 WINDOW = 'debug_viz'
+MASK_WINDOW = 'foreground mask'
 
 
 def recv_exact(sock, n):
@@ -33,12 +36,22 @@ def recv_exact(sock, n):
 
 
 def read_frame(sock):
-    """Return (image, x, y, radius) for the next frame; image is None if undecodable."""
+    """
+    Return the next frame as ('image', image, x, y, radius) or ('mask', mask).
+
+    The decoded picture is None if it could not be decoded.
+    """
     (length,) = HEADER.unpack(recv_exact(sock, HEADER.size))
     body = recv_exact(sock, length)
-    x, y, radius = POINT.unpack(body[:POINT.size])
-    image = cv2.imdecode(np.frombuffer(body[POINT.size:], np.uint8), cv2.IMREAD_COLOR)
-    return image, x, y, radius
+    kind, payload = body[:1], body[1:]
+    if kind == IMAGE:
+        x, y, radius = POINT.unpack(payload[:POINT.size])
+        image = cv2.imdecode(np.frombuffer(payload[POINT.size:], np.uint8), cv2.IMREAD_COLOR)
+        return 'image', image, x, y, radius
+    if kind == MASK:
+        mask = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_GRAYSCALE)
+        return 'mask', mask
+    raise ValueError(f'unknown frame kind {kind!r}')
 
 
 def draw(image, x, y, radius):
@@ -68,6 +81,7 @@ def main():
     args = parser.parse_args()
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(MASK_WINDOW, cv2.WINDOW_NORMAL)
     try:
         while True:
             try:
@@ -82,14 +96,18 @@ def main():
             sock.settimeout(5)
             try:
                 while True:
-                    image, x, y, radius = read_frame(sock)
-                    if image is None:
+                    frame = read_frame(sock)
+                    if frame[1] is None:
                         continue
-                    draw(image, x, y, radius)
-                    cv2.imshow(WINDOW, image)
+                    if frame[0] == 'image':
+                        _, image, x, y, radius = frame
+                        draw(image, x, y, radius)
+                        cv2.imshow(WINDOW, image)
+                    else:
+                        cv2.imshow(MASK_WINDOW, frame[1])
                     if cv2.waitKey(1) == ord('q'):
                         return
-            except (OSError, ConnectionError, struct.error) as exc:
+            except (OSError, ConnectionError, ValueError, struct.error) as exc:
                 print(f'Disconnected ({exc}); reconnecting')
                 time.sleep(1)
             finally:

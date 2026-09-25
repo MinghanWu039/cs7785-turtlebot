@@ -76,15 +76,17 @@ def exclude_skin_hue(hsv, mask, hue_range=(0, 20)):
     return cv2.bitwise_and(mask, cv2.bitwise_not(skin_mask))
 
 
-def find_foreground_objects(foreground_mask, min_area=1000):
-    """Return contours found in the foreground mask along with their statistics."""
-    objects = []
-
-    # Apply morphological operations to clean up the mask
+def clean_mask(mask):
+    """Remove small specks and holes from a foreground mask."""
     kernel = np.ones((7, 7), np.uint8)
-    mask = foreground_mask
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+
+def find_foreground_objects(foreground_mask, min_area=1000):
+    """Return contours (with statistics) found in a foreground mask cleaned by clean_mask."""
+    objects = []
+    mask = foreground_mask
 
     contours, _ = cv2.findContours(
         mask,
@@ -275,6 +277,9 @@ class FindObject(Node):
     normalized to [-1, 1] (0, 0 is the image center, +x is right, +y is up)
     and z is its radius in pixels (0 when no radius is known).
 
+    Also publishes the foreground mask used for each image as a PNG
+    CompressedImage on /debug_mask (all black while capturing the background).
+
     Also publishes an ImagePoint on /debug_viz for every received image, with
     the compressed image and the object's raw pixel center (x, y) and radius
     (z). When no object is found the point is (-1, -1, -1).
@@ -305,6 +310,8 @@ class FindObject(Node):
             qos_profile_sensor_data)
         self.object_pub = self.create_publisher(Point, '/object', 10)
         self.debug_viz_pub = self.create_publisher(ImagePoint, '/debug_viz', 10)
+        self.debug_mask_pub = self.create_publisher(CompressedImage, '/debug_mask', 10)
+        self.foreground_mask = None
 
     def image_callback(self, msg):
         frame = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
@@ -313,16 +320,28 @@ class FindObject(Node):
             return
 
         prev_status = self.state.status
+        self.foreground_mask = None
         point = self.detect_object(frame)
         if point is not None:
             self.object_pub.publish(normalize_point(frame, point))
         self.debug_viz_pub.publish(
             ImagePoint(image=msg, point=NO_OBJECT_POINT if point is None else point))
+        self.publish_mask(msg.header, frame.shape[:2])
 
         if prev_status != self.state.status:
             self.get_logger().info(f'Status: {self.state.status}')
         if self.display:
             cv2.waitKey(1)
+
+    def publish_mask(self, header, shape):
+        """Publish the foreground mask used for this frame (all black when there is none)."""
+        mask = self.foreground_mask
+        if mask is None:
+            mask = np.zeros(shape, dtype=np.uint8)
+        ok, png = cv2.imencode('.png', mask)
+        if ok:
+            self.debug_mask_pub.publish(
+                CompressedImage(header=header, format='png', data=png.tobytes()))
 
     def show(self, name, image):
         if self.display:
@@ -377,7 +396,9 @@ class FindObject(Node):
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         foreground_mask = exclude_skin_hue(hsv, foreground_mask)
 
-        objects = find_foreground_objects(foreground_mask)
+        cleaned_mask = clean_mask(foreground_mask)
+        self.foreground_mask = cleaned_mask
+        objects = find_foreground_objects(cleaned_mask)
 
         if self.display:
             for obj in objects:
@@ -443,6 +464,7 @@ class FindObject(Node):
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         foreground_mask = exclude_skin_hue(hsv, foreground_mask)
+        self.foreground_mask = foreground_mask
 
         matches = find_hue_matches(hsv, foreground_mask, state.hue_range)
 

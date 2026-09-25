@@ -7,15 +7,20 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import CompressedImage
 
-# Wire format, per frame (big-endian): uint32 length, then `length` bytes of
-# float32 x, float32 y, float32 radius followed by the JPEG image bytes.
+# Wire format, per frame (big-endian): uint32 length, then `length` bytes made of
+# one kind byte followed by the payload:
+#   IMAGE: float32 x, float32 y, float32 radius, then the JPEG image bytes.
+#   MASK:  the PNG foreground mask bytes.
 HEADER = struct.Struct('>I')
 POINT = struct.Struct('>fff')
+IMAGE = b'I'
+MASK = b'M'
 
 
 class DebugVizServer(Node):
-    """Forward /debug_viz over TCP so a machine without ROS/DDS can display it."""
+    """Forward /debug_viz and /debug_mask over TCP so a machine without ROS/DDS can show them."""
 
     def __init__(self):
         super().__init__('debug_viz_server')
@@ -25,24 +30,32 @@ class DebugVizServer(Node):
 
         self.cond = threading.Condition()
         self.seq = 0
-        self.payload = None
+        self.latest = {}  # kind -> (seq, payload); only the newest frame of each kind is kept
 
         self.create_subscription(
-            ImagePoint, '/debug_viz', self.callback, qos_profile_sensor_data)
+            ImagePoint, '/debug_viz', self.viz_callback, qos_profile_sensor_data)
+        self.create_subscription(
+            CompressedImage, '/debug_mask', self.mask_callback, qos_profile_sensor_data)
 
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server.bind((host, port))
         self.server.listen()
-        self.get_logger().info(f'Serving /debug_viz on {host}:{port}')
+        self.get_logger().info(f'Serving /debug_viz and /debug_mask on {host}:{port}')
         threading.Thread(target=self.accept_loop, daemon=True).start()
 
-    def callback(self, msg):
+    def viz_callback(self, msg):
         body = POINT.pack(msg.point.x, msg.point.y, msg.point.z) + bytes(msg.image.data)
-        payload = HEADER.pack(len(body)) + body
+        self.store(IMAGE, body)
+
+    def mask_callback(self, msg):
+        self.store(MASK, bytes(msg.data))
+
+    def store(self, kind, body):
+        body = kind + body
         with self.cond:
             self.seq += 1
-            self.payload = payload
+            self.latest[kind] = (self.seq, HEADER.pack(len(body)) + body)
             self.cond.notify_all()
 
     def accept_loop(self):
@@ -63,10 +76,11 @@ class DebugVizServer(Node):
                     self.cond.wait_for(lambda: self.seq != last_seq, timeout=1.0)
                     if self.seq == last_seq:
                         continue
+                    # A slow client only ever gets the newest frame of each kind.
+                    fresh = sorted(v for v in self.latest.values() if v[0] > last_seq)
                     last_seq = self.seq
-                    payload = self.payload
-                # A slow client only ever gets the newest frame; older ones are skipped.
-                conn.sendall(payload)
+                for _, payload in fresh:
+                    conn.sendall(payload)
         except OSError:
             pass
         finally:
