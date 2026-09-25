@@ -16,7 +16,12 @@ DISTANCE_THRESHOLD = 500
 NO_OBJECT_POINT = Point(x=-1.0, y=-1.0, z=-1.0)  # negative radius means "no object"
 
 
+BACKGROUND_FRAMES = 5
+FOREGROUND_THRESHOLD = 45
+
+
 class Status(Enum):
+    BACKGROUND = auto()
     OBJECT = auto()
     TRACKING = auto()
 
@@ -24,7 +29,11 @@ class Status(Enum):
 class State:
 
     def __init__(self):
-        self.status = Status.OBJECT
+        self.status = Status.BACKGROUND
+        self.background_gray_buffer = []
+        self.background_color_buffer = []
+        self.background_gray = None
+        self.background_color = None
         self.tracking_window = None
         self.roi_hist = None
         self.tracking_center = None
@@ -34,6 +43,27 @@ class State:
 def full_foreground(frame):
     """Return a foreground mask that treats the whole frame as foreground."""
     return np.full(frame.shape[:2], 255, dtype=np.uint8)
+
+
+def background_foreground(frame, background_gray, background_color,
+                          threshold=FOREGROUND_THRESHOLD):
+    """
+    Return a foreground mask from differences against a stored background.
+
+    Combines the grayscale intensity difference with a per-channel color
+    difference, so objects that are similarly bright but differently colored
+    than the background still show up in the mask.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    diff_intensity = cv2.absdiff(gray, background_gray)
+    diff_color = np.max(cv2.absdiff(frame, background_color), axis=2)
+    diff = cv2.max(diff_intensity, diff_color)
+
+    _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+    mask = cv2.medianBlur(mask, 5)
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
 
 def exclude_skin_hue(hsv, mask, hue_range=(0, 20)):
@@ -258,6 +288,10 @@ class FindObject(Node):
         self.image_topic = self.declare_parameter(
             'image_topic', '/image_raw/compressed').value
 
+        # Keep background subtraction on while TRACKING too (it is always on
+        # while looking for the object).
+        self.static = self.declare_parameter('static', False).value
+
         self.state = State()
 
         if self.display:
@@ -298,6 +332,10 @@ class FindObject(Node):
         """Advance the tracking state machine; return the object pixel Point, or None."""
         state = self.state
 
+        if state.status == Status.BACKGROUND:
+            self.capture_background(frame)
+            return None
+
         if state.status == Status.OBJECT:
             return self.find_new_object(frame)
 
@@ -306,9 +344,35 @@ class FindObject(Node):
 
         return None
 
+    def capture_background(self, frame):
+        """Average a few frames into a background; runs before every OBJECT phase."""
+        state = self.state
+        if state.background_gray_buffer and \
+                state.background_gray_buffer[0].shape != frame.shape[:2]:
+            state.background_gray_buffer = []
+            state.background_color_buffer = []
+        state.background_gray_buffer.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        state.background_color_buffer.append(frame)
+        if len(state.background_gray_buffer) < BACKGROUND_FRAMES:
+            return
+
+        state.background_gray = np.mean(
+            state.background_gray_buffer, axis=0).astype(np.uint8)
+        state.background_color = np.mean(
+            state.background_color_buffer, axis=0).astype(np.uint8)
+        state.background_gray_buffer = []
+        state.background_color_buffer = []
+        state.status = Status.OBJECT
+
     def find_new_object(self, frame):
         state = self.state
-        foreground_mask = full_foreground(frame)
+        if state.background_gray.shape != frame.shape[:2]:
+            self.get_logger().warn('Image size changed, recapturing background')
+            state.status = Status.BACKGROUND
+            return None
+
+        foreground_mask = background_foreground(
+            frame, state.background_gray, state.background_color)
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         foreground_mask = exclude_skin_hue(hsv, foreground_mask)
@@ -371,7 +435,11 @@ class FindObject(Node):
 
     def track_object(self, frame):
         state = self.state
-        foreground_mask = full_foreground(frame)
+        if self.static and state.background_gray.shape == frame.shape[:2]:
+            foreground_mask = background_foreground(
+                frame, state.background_gray, state.background_color)
+        else:
+            foreground_mask = full_foreground(frame)
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         foreground_mask = exclude_skin_hue(hsv, foreground_mask)
@@ -392,13 +460,13 @@ class FindObject(Node):
 
         if best_match is None:
             self.get_logger().info('No matching hue range found')
-            state.status = Status.OBJECT
+            state.status = Status.BACKGROUND
             self.show('circle tracking', frame)
             return None
 
         if best_distance > DISTANCE_THRESHOLD:
             self.get_logger().info(f'Best candidate too far: {best_distance:.2f}')
-            state.status = Status.OBJECT
+            state.status = Status.BACKGROUND
             self.show('circle tracking', frame)
             return None
 
