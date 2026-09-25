@@ -1,5 +1,5 @@
 from geometry_msgs.msg import Point
-from geometry_msgs.msg import TwistStamped
+from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -27,7 +27,7 @@ class RotateRobot(Node):
         super().__init__('rotate_robot')
         self.object_sub = self.create_subscription(
             Point, '/object', self.object_callback, 10)
-        self.cmd_vel_pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
+        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         self.last_object_time = None
         self.timer = self.create_timer(0.1, self.timer_callback)
@@ -49,10 +49,8 @@ class RotateRobot(Node):
             self.publish_cmd(0.0)
 
     def publish_cmd(self, angular_z):
-        cmd = TwistStamped()
-        cmd.header.stamp = self.get_clock().now().to_msg()
-        cmd.header.frame_id = 'base_link'
-        cmd.twist.angular.z = angular_z
+        cmd = Twist()
+        cmd.angular.z = angular_z
         self.cmd_vel_pub.publish(cmd)
 
 
