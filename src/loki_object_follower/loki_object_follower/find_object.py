@@ -225,10 +225,11 @@ def find_hue_matches(hsv, foreground_mask, hue_range, min_area=500):
 
     Unlike refine_contour_by_hue_and_circle, this does not run a Hough
     circle test - it just intersects the hue mask with the foreground mask
-    and returns each resulting contour with its enclosing circle.
+    and returns each resulting contour with its enclosing circle, plus the
+    intersected mask (None when there is no hue range).
     """
     if hue_range is None:
-        return []
+        return [], None
 
     lower_hue, upper_hue = hue_range
     hue_mask = cv2.inRange(hsv[:, :, 0], lower_hue, upper_hue)
@@ -243,7 +244,7 @@ def find_hue_matches(hsv, foreground_mask, hue_range, min_area=500):
         (cx, cy), r = cv2.minEnclosingCircle(contour)
         matches.append((contour, (int(cx), int(cy), int(r))))
 
-    return matches
+    return matches, mask
 
 
 def pixel_point(center, radius):
@@ -277,8 +278,10 @@ class FindObject(Node):
     normalized to [-1, 1] (0, 0 is the image center, +x is right, +y is up)
     and z is its radius in pixels (0 when no radius is known).
 
-    Also publishes the foreground mask used for each image as a PNG
-    CompressedImage on /debug_mask (all black while capturing the background).
+    Also publishes a debug mask for each image as a PNG CompressedImage on
+    /debug_mask: the cleaned foreground mask while looking for an object, the
+    pixels inside the tracked hue band while tracking, and all black while
+    capturing the background.
 
     Also publishes an ImagePoint on /debug_viz for every received image, with
     the compressed image and the object's raw pixel center (x, y) and radius
@@ -464,9 +467,9 @@ class FindObject(Node):
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         foreground_mask = exclude_skin_hue(hsv, foreground_mask)
-        self.foreground_mask = foreground_mask
 
-        matches = find_hue_matches(hsv, foreground_mask, state.hue_range)
+        matches, self.foreground_mask = find_hue_matches(
+            hsv, foreground_mask, state.hue_range)
 
         best_match = None
         best_distance = None
