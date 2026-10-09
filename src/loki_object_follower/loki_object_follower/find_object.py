@@ -19,6 +19,13 @@ NO_OBJECT_POINT = Point(x=-1.0, y=-1.0, z=-1.0)  # negative radius means "no obj
 BACKGROUND_FRAMES = 5
 FOREGROUND_THRESHOLD = 45
 
+# Below these, a pixel's hue is unreliable (near-gray or near-black/white),
+# so it's excluded from hue matching regardless of its hue value - without
+# this, washed-out/shadowed pixels anywhere in frame can land inside the hue
+# band by chance and show up as scattered noise in the tracking mask.
+MIN_HUE_SATURATION = 60  # out of 255
+MIN_HUE_VALUE = 40  # out of 255
+
 
 class Status(Enum):
     BACKGROUND = auto()
@@ -232,8 +239,10 @@ def find_hue_matches(hsv, foreground_mask, hue_range, min_area=500):
         return [], None
 
     lower_hue, upper_hue = hue_range
-    hue_mask = cv2.inRange(hsv[:, :, 0], lower_hue, upper_hue)
+    hue_mask = cv2.inRange(
+        hsv, (lower_hue, MIN_HUE_SATURATION, MIN_HUE_VALUE), (upper_hue, 255, 255))
     mask = cv2.bitwise_and(hue_mask, foreground_mask)
+    mask = clean_mask(mask)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 

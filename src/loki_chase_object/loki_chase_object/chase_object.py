@@ -33,7 +33,7 @@ class ChaseObject(Node):
 
     def __init__(self):
         super().__init__('chase_object')
-        self.desired_distance = self.declare_parameter('desired_distance', 0.2).value  # m
+        self.desired_distance = self.declare_parameter('desired_distance', 0.5).value  # m
 
         self.angular_pid = PIDController(ANGULAR_KP, ANGULAR_KI, ANGULAR_MAX_SPEED)
         self.linear_pid = PIDController(LINEAR_KP, LINEAR_KI, LINEAR_MAX_SPEED)
