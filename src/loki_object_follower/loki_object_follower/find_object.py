@@ -12,7 +12,7 @@ from sensor_msgs.msg import CompressedImage
 
 
 CIRCLE_FIT_THRESHOLD = 0.5
-DISTANCE_THRESHOLD = 500
+DISTANCE_THRESHOLD = 100
 NO_OBJECT_POINT = Point(x=-1.0, y=-1.0, z=-1.0)  # negative radius means "no object"
 
 
