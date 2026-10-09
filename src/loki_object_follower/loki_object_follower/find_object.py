@@ -5,6 +5,7 @@ from geometry_msgs.msg import Point
 from loki_object_follower_msgs.msg import ImagePoint
 import numpy as np
 import rclpy
+from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -18,6 +19,12 @@ NO_OBJECT_POINT = Point(x=-1.0, y=-1.0, z=-1.0)  # negative radius means "no obj
 
 BACKGROUND_FRAMES = 5
 FOREGROUND_THRESHOLD = 45
+
+# If OBJECT phase goes this long without finding a good-enough candidate,
+# the stored background is assumed stale (e.g. the robot moved, or it was
+# captured while still in motion) - recapture it instead of looping forever
+# against the same bad reference.
+OBJECT_SEARCH_TIMEOUT = 3.0  # s
 
 # Below these, a pixel's hue is unreliable (near-gray or near-black/white),
 # so it's excluded from hue matching regardless of its hue value - without
@@ -45,6 +52,7 @@ class State:
         self.roi_hist = None
         self.tracking_center = None
         self.hue_range = None
+        self.object_search_start = None
 
 
 def full_foreground(frame):
@@ -394,6 +402,7 @@ class FindObject(Node):
         state.background_gray_buffer = []
         state.background_color_buffer = []
         state.status = Status.OBJECT
+        state.object_search_start = self.get_clock().now()
 
     def find_new_object(self, frame):
         state = self.state
@@ -433,6 +442,11 @@ class FindObject(Node):
             best_object = None
 
         if best_object is None:
+            search_age = self.get_clock().now() - state.object_search_start
+            if search_age > Duration(seconds=OBJECT_SEARCH_TIMEOUT):
+                self.get_logger().info(
+                    'No object found for too long, recapturing background')
+                state.status = Status.BACKGROUND
             self.show('circle tracking', frame)
             return None
 
