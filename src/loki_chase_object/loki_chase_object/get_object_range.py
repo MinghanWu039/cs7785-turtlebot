@@ -1,6 +1,7 @@
 import math
 
 import rclpy
+from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -10,6 +11,12 @@ from std_msgs.msg import Float32MultiArray
 
 
 RANGE_SEARCH_WINDOW = 5  # indices on each side of the bearing to search for a valid return
+
+# /object_bearing is only published while detect_object actually sees the
+# object (it goes silent, not to a sentinel value, when the object is lost).
+# Without this, scan_callback would keep republishing /object_state using a
+# frozen, stale bearing forever just because /scan keeps arriving.
+BEARING_TIMEOUT = 0.5  # s, treat the bearing as stale once it's this old
 
 # Yaw angle (rad) of the LIDAR frame relative to the camera frame: the angle
 # to add to a camera bearing to get the equivalent angle in the LIDAR's
@@ -50,10 +57,12 @@ class GetObjectRange(Node):
         self.state_pub = self.create_publisher(Float32MultiArray, '/object_state', 10)
 
         self.last_bearing = None
+        self.last_bearing_time = None
         self.last_scan = None
 
     def bearing_callback(self, msg):
         self.last_bearing = msg.data
+        self.last_bearing_time = self.get_clock().now()
         self.publish_state()
 
     def scan_callback(self, msg):
@@ -71,10 +80,15 @@ class GetObjectRange(Node):
 
         Returns:
             Float32MultiArray: A message containing [angle (rad), distance (m)],
-            or None if there's no bearing/scan yet, or no valid return near
-            the bearing.
+            or None if there's no bearing/scan yet, the bearing has gone
+            stale (object no longer visible), or no valid return near the
+            bearing.
         """
         if self.last_bearing is None or self.last_scan is None:
+            return None
+
+        bearing_age = self.get_clock().now() - self.last_bearing_time
+        if bearing_age > Duration(seconds=BEARING_TIMEOUT):
             return None
 
         scan = self.last_scan
