@@ -436,13 +436,7 @@ class FindObject(Node):
             self.show('circle tracking', frame)
             return None
 
-        # Reuse a previously learned hue band instead of re-deriving it (and
-        # overwriting what's already known) every time the object is
-        # reacquired after being lost - only sample a fresh one the first
-        # time an object is ever found.
-        hue_range = state.hue_range
-        if hue_range is None:
-            hue_range = mean_hue_band(hsv, best_object['mask'])
+        hue_range = mean_hue_band(hsv, best_object['mask'])
 
         refined_contour, circumscribing_circle = refine_contour_by_hue_and_circle(
             hsv, foreground_mask, best_object, hue_range,
