@@ -90,7 +90,7 @@ def clean_mask(mask):
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
 
-def find_foreground_objects(foreground_mask, min_area=1000):
+def find_foreground_objects(foreground_mask, min_area=100):
     """Return contours (with statistics) found in a foreground mask cleaned by clean_mask."""
     objects = []
     mask = foreground_mask
@@ -133,7 +133,7 @@ def find_foreground_objects(foreground_mask, min_area=1000):
     return objects
 
 
-def mean_hue_band(hsv, mask, num_samples=20, band=10):
+def mean_hue_band(hsv, mask, num_samples=20, band=5):
     """
     Return a +-band hue range around the circular mean hue inside the mask.
 
@@ -226,7 +226,7 @@ def refine_contour_by_hue_and_circle(hsv, foreground_mask, obj, hue_range):
     return refined_contour, circumscribing_circle
 
 
-def find_hue_matches(hsv, foreground_mask, hue_range, min_area=500):
+def find_hue_matches(hsv, foreground_mask, hue_range, min_area=100):
     """
     Find contours in the foreground mask that fall within a hue range.
 
