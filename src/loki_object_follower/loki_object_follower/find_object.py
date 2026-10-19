@@ -1,3 +1,5 @@
+import json
+import os
 from enum import auto, Enum
 
 import cv2
@@ -30,8 +32,15 @@ OBJECT_SEARCH_TIMEOUT = 3.0  # s
 # so it's excluded from hue matching regardless of its hue value - without
 # this, washed-out/shadowed pixels anywhere in frame can land inside the hue
 # band by chance and show up as scattered noise in the tracking mask.
-MIN_HUE_SATURATION = 60  # out of 255
-MIN_HUE_VALUE = 40  # out of 255
+MIN_HUE_SATURATION = 100  # out of 255
+MIN_HUE_VALUE = 70  # out of 255
+
+# Tighter band and saving criteria than general detection, so a marginal or
+# inconsistent read can't overwrite a previously good saved color profile.
+HUE_BAND = 3  # +-degrees around the sampled mean hue
+MIN_HUE_CONSISTENCY = 0.8  # circular resultant length in [0, 1]; sampled hues must agree at least this much
+PROFILE_MIN_AREA = 800  # contour area required before saving a profile
+PROFILE_MIN_CIRCLE_FIT = 0.7  # circle_fit required before saving a profile
 
 
 class Status(Enum):
@@ -98,7 +107,7 @@ def clean_mask(mask):
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
 
-def find_foreground_objects(foreground_mask, min_area=100):
+def find_foreground_objects(foreground_mask, min_area=400):
     """Return contours (with statistics) found in a foreground mask cleaned by clean_mask."""
     objects = []
     mask = foreground_mask
@@ -141,11 +150,15 @@ def find_foreground_objects(foreground_mask, min_area=100):
     return objects
 
 
-def mean_hue_band(hsv, mask, num_samples=20, band=5):
+def mean_hue_band(hsv, mask, num_samples=20, band=HUE_BAND):
     """
     Return a +-band hue range around the circular mean hue inside the mask.
 
     Samples points inside the mask; the range is wrapped around [0, 360].
+    Returns None if the mask is empty, or if the sampled hues disagree too
+    much (circular resultant length below MIN_HUE_CONSISTENCY) to trust the
+    mean - e.g. the mask straddles an edge between two differently-colored
+    regions.
     """
     ys, xs = np.nonzero(mask)
     if len(xs) == 0:
@@ -156,12 +169,42 @@ def mean_hue_band(hsv, mask, num_samples=20, band=5):
     hues = hsv[ys[indices], xs[indices], 0].astype(np.float64)
 
     angles = np.deg2rad(hues)
-    mean_angle = np.arctan2(np.mean(np.sin(angles)), np.mean(np.cos(angles)))
+    mean_cos = np.mean(np.cos(angles))
+    mean_sin = np.mean(np.sin(angles))
+    if np.hypot(mean_cos, mean_sin) < MIN_HUE_CONSISTENCY:
+        return None
+
+    mean_angle = np.arctan2(mean_sin, mean_cos)
     mean_hue = np.rad2deg(mean_angle) % 360
 
     lower_hue = (mean_hue - band) % 360
     upper_hue = (mean_hue + band) % 360
     return lower_hue, upper_hue
+
+
+def load_color_profile(path):
+    """Return a saved color profile dict, or None if missing/unreadable."""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def save_color_profile(path, lower_hue, upper_hue, min_saturation, min_value):
+    """Save a color profile dict; returns False (without raising) on failure."""
+    profile = {
+        'lower_hue': lower_hue,
+        'upper_hue': upper_hue,
+        'min_saturation': min_saturation,
+        'min_value': min_value,
+    }
+    try:
+        with open(path, 'w') as f:
+            json.dump(profile, f)
+    except OSError:
+        return False
+    return True
 
 
 def fit_circle_to_contour(contour, object_mask):
@@ -234,7 +277,8 @@ def refine_contour_by_hue_and_circle(hsv, foreground_mask, obj, hue_range):
     return refined_contour, circumscribing_circle
 
 
-def find_hue_matches(hsv, foreground_mask, hue_range, min_area=100):
+def find_hue_matches(hsv, foreground_mask, hue_range, min_area=100,
+                     min_saturation=MIN_HUE_SATURATION, min_value=MIN_HUE_VALUE):
     """
     Find contours in the foreground mask that fall within a hue range.
 
@@ -248,7 +292,7 @@ def find_hue_matches(hsv, foreground_mask, hue_range, min_area=100):
 
     lower_hue, upper_hue = hue_range
     hue_mask = cv2.inRange(
-        hsv, (lower_hue, MIN_HUE_SATURATION, MIN_HUE_VALUE), (upper_hue, 255, 255))
+        hsv, (lower_hue, min_saturation, min_value), (upper_hue, 255, 255))
     mask = cv2.bitwise_and(hue_mask, foreground_mask)
     mask = clean_mask(mask)
 
@@ -317,7 +361,35 @@ class FindObject(Node):
         # while looking for the object).
         self.static = self.declare_parameter('static', False).value
 
+        # Skips BACKGROUND/OBJECT (no background subtraction, no Hough
+        # circle fit) and starts tracking immediately using a hue range
+        # given directly or loaded from color_profile_path.
+        self.hardcoded_hue = self.declare_parameter('hardcoded_hue', False).value
+        self.color_profile_path = self.declare_parameter(
+            'color_profile_path', os.path.expanduser('~/.loki_color_profile.json')).value
+        self.min_hue_saturation = self.declare_parameter(
+            'min_saturation', MIN_HUE_SATURATION).value
+        self.min_hue_value = self.declare_parameter('min_value', MIN_HUE_VALUE).value
+        hue_lower = self.declare_parameter('hue_lower', -1.0).value
+        hue_upper = self.declare_parameter('hue_upper', -1.0).value
+
         self.state = State()
+
+        if self.hardcoded_hue:
+            if hue_lower >= 0.0 and hue_upper >= 0.0:
+                self.state.hue_range = (hue_lower, hue_upper)
+            else:
+                profile = load_color_profile(self.color_profile_path)
+                if profile is None:
+                    self.get_logger().error(
+                        'hardcoded_hue enabled but no hue_lower/hue_upper given and '
+                        f'no profile found at {self.color_profile_path}')
+                else:
+                    self.state.hue_range = (profile['lower_hue'], profile['upper_hue'])
+                    self.min_hue_saturation = profile.get(
+                        'min_saturation', self.min_hue_saturation)
+                    self.min_hue_value = profile.get('min_value', self.min_hue_value)
+            self.state.status = Status.TRACKING
 
         if self.display:
             cv2.namedWindow('circle tracking', cv2.WINDOW_NORMAL)
@@ -451,6 +523,14 @@ class FindObject(Node):
             return None
 
         hue_range = mean_hue_band(hsv, best_object['mask'])
+        if hue_range is not None and best_object['area'] >= PROFILE_MIN_AREA \
+                and best_object['circle_fit'] >= PROFILE_MIN_CIRCLE_FIT:
+            saved = save_color_profile(
+                self.color_profile_path, hue_range[0], hue_range[1],
+                self.min_hue_saturation, self.min_hue_value)
+            self.get_logger().info(
+                f'Saved color profile to {self.color_profile_path}' if saved
+                else f'Could not save color profile to {self.color_profile_path}')
 
         refined_contour, circumscribing_circle = refine_contour_by_hue_and_circle(
             hsv, foreground_mask, best_object, hue_range,
@@ -482,38 +562,58 @@ class FindObject(Node):
 
     def track_object(self, frame):
         state = self.state
-        if self.static and state.background_gray.shape == frame.shape[:2]:
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        # foreground_mask is strictly the color-profile match when static is
+        # False; when static is True, it's narrowed to the intersection with
+        # the background-diff mask too (background_gray is None in
+        # hardcoded_hue mode, so this naturally falls back to the
+        # color-only mask there as well).
+        if self.static and state.background_gray is not None \
+                and state.background_gray.shape == frame.shape[:2]:
             foreground_mask = background_foreground(
                 frame, state.background_gray, state.background_color)
         else:
             foreground_mask = full_foreground(frame)
 
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        foreground_mask = exclude_skin_hue(hsv, foreground_mask)
-
         matches, self.foreground_mask = find_hue_matches(
-            hsv, foreground_mask, state.hue_range)
+            hsv, foreground_mask, state.hue_range,
+            min_saturation=self.min_hue_saturation, min_value=self.min_hue_value)
 
-        best_match = None
-        best_distance = None
-        for contour, circle in matches:
-            cx, cy = circle[:2]
-            distance = np.hypot(
-                cx - state.tracking_center[0],
-                cy - state.tracking_center[1],
-            )
-            if best_distance is None or distance < best_distance:
-                best_distance = distance
-                best_match = (contour, circle)
+        if state.tracking_center is None:
+            # No prior position to anchor on (hardcoded mode's first frame,
+            # or reacquiring after a loss) - take the largest hue match.
+            best_match = max(matches, key=lambda m: cv2.contourArea(m[0]), default=None)
+            best_distance = 0.0
+        else:
+            best_match = None
+            best_distance = None
+            for contour, circle in matches:
+                cx, cy = circle[:2]
+                distance = np.hypot(
+                    cx - state.tracking_center[0],
+                    cy - state.tracking_center[1],
+                )
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+                    best_match = (contour, circle)
 
         if best_match is None:
             self.get_logger().info('No matching hue range found')
+            if self.hardcoded_hue:
+                state.tracking_center = None
+                self.show('circle tracking', frame)
+                return None
             state.status = Status.BACKGROUND
             self.show('circle tracking', frame)
             return None
 
-        if best_distance > DISTANCE_THRESHOLD:
+        if state.tracking_center is not None and best_distance > DISTANCE_THRESHOLD:
             self.get_logger().info(f'Best candidate too far: {best_distance:.2f}')
+            if self.hardcoded_hue:
+                state.tracking_center = None
+                self.show('circle tracking', frame)
+                return None
             state.status = Status.BACKGROUND
             self.show('circle tracking', frame)
             return None
