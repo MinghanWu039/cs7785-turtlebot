@@ -11,7 +11,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name, ['package.xml', 'wayPoints.txt']),
         ('share/' + package_name + '/launch', glob.glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'odom_viz_server = loki_navigate_to_goal.odom_viz_server:main',
             'vlio_node = loki_navigate_to_goal.vlio_node:main',
+            'go_to_goal = loki_navigate_to_goal.go_to_goal:main',
         ],
     },
 )
