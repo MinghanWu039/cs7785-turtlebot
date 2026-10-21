@@ -99,13 +99,22 @@ ICP_METHODS = {'point_to_point': icp, 'point_to_line': icp_point_to_line}
 
 
 class VlioNode(Node):
-    """Refine wheel odometry by ICP-aligning each /scan to the previous one."""
+    """
+    Refine wheel odometry by ICP-aligning each /scan to a keyframe scan.
+
+    Every scan is matched against the same keyframe until the robot has moved keyframe_dist
+    or turned keyframe_angle from it, and only then becomes the new keyframe. Scan noise
+    (the LDS-02's beam angles jitter by about 0.3 deg per revolution) then stays a bounded
+    error instead of accumulating on every scan. keyframe_dist:=0.0 gives scan-to-scan ICP.
+    """
 
     def __init__(self):
         super().__init__('vlio_node')
         odom_topic = self.declare_parameter('odom_topic', '/odom').value
         scan_topic = self.declare_parameter('scan_topic', '/scan').value
         output_topic = self.declare_parameter('output_topic', '/vlio_odom').value
+        # use_icp:=false passes the odometry through unchanged, at the scan rate.
+        self.use_icp = self.declare_parameter('use_icp', True).value
         self.iterations = self.declare_parameter('iterations', 10).value
         # point_to_line lets points slide along walls; point_to_point is the plain variant.
         method = self.declare_parameter('icp_method', 'point_to_line').value
@@ -116,19 +125,25 @@ class VlioNode(Node):
         self.min_matches = self.declare_parameter('min_matches', 20).value
         # base_scan sits 3.2 cm behind base_link on the burger (turtlebot3_burger.urdf).
         self.laser_x_offset = self.declare_parameter('laser_x_offset', -0.032).value
+        self.keyframe_dist = self.declare_parameter('keyframe_dist', 0.2).value  # m
+        self.keyframe_angle = math.radians(
+            self.declare_parameter('keyframe_angle', 10.0).value)  # parameter in degrees
 
         self.odom = deque(maxlen=ODOM_BUFFER)  # (stamp, x, y, theta)
-        self.last_pose = None  # ICP pose at the previous scan
-        self.last_odom = None  # odometry pose at the previous scan
-        self.last_points = None
+        self.last_pose = None  # pose at the latest scan, as published
+        self.kf_pose = None  # pose of the keyframe scan
+        self.kf_odom = None  # odometry pose at the keyframe scan
+        self.kf_points = None
 
         self.create_subscription(
             Odometry, odom_topic, self.odom_callback, qos_profile_sensor_data)
         self.create_subscription(
             LaserScan, scan_topic, self.scan_callback, qos_profile_sensor_data)
         self.pub = self.create_publisher(Odometry, output_topic, 10)
-        self.get_logger().info(
-            f'{method} ICP on {scan_topic} + {odom_topic} -> {output_topic}')
+        mode = (f'{method} ICP, new keyframe every {self.keyframe_dist:g} m or '
+                f'{math.degrees(self.keyframe_angle):g} deg'
+                if self.use_icp else 'ICP disabled, odometry only')
+        self.get_logger().info(f'{mode} on {scan_topic} + {odom_topic} -> {output_topic}')
 
     def odom_callback(self, msg):
         pose = msg.pose.pose
@@ -142,27 +157,47 @@ class VlioNode(Node):
         points = scan_to_points(msg.ranges, msg.angle_min, msg.angle_increment,
                                 msg.range_min, msg.range_max, self.laser_x_offset)
 
-        if self.last_pose is None:
+        if self.kf_pose is None:
             # Start in the odometry frame so /vlio_odom is directly comparable to /odom.
             self.last_pose = odom_now
+            self.set_keyframe(points, odom_now)
         else:
-            odom_between = compose(inverse(self.last_odom), odom_now)
-            step, matches, error, ok = self.icp(points, self.last_points, odom_between,
-                                                self.iterations, self.max_dist, self.min_matches)
-            if not ok:
-                # Too little overlap to trust the partial estimate; keep the odometry step.
-                self.get_logger().warn(
-                    f'ICP had only {matches} correspondences; using odometry for this scan',
-                    throttle_duration_sec=2.0)
-                step = odom_between
-            self.get_logger().debug(
-                f'ICP {matches} matches, mean error {error:.3f} m, correction '
-                f'dx={step[0] - odom_between[0]:+.3f} dy={step[1] - odom_between[1]:+.3f} '
-                f'dth={math.degrees(wrap_angle(step[2] - odom_between[2])):+.2f} deg')
-            self.last_pose = compose(self.last_pose, step)
-        self.last_odom = odom_now
-        self.last_points = points
+            odom_from_kf = compose(inverse(self.kf_odom), odom_now)
+            if self.use_icp:
+                from_kf, ok = self.refine(points, odom_from_kf)
+            else:
+                from_kf, ok = odom_from_kf, True
+            self.last_pose = compose(self.kf_pose, from_kf)
+            moved = math.hypot(from_kf[0], from_kf[1]) > self.keyframe_dist
+            turned = abs(from_kf[2]) > self.keyframe_angle
+            # A failed match also starts a new keyframe, so the next scans overlap with it.
+            if moved or turned or not ok:
+                self.set_keyframe(points, odom_now)
         self.publish(msg.header.stamp)
+
+    def set_keyframe(self, points, odom_now):
+        self.kf_pose, self.kf_odom, self.kf_points = self.last_pose, odom_now, points
+
+    def refine(self, points, odom_from_kf):
+        """
+        ICP-align points to the keyframe, starting from the odometry motion since it.
+
+        Returns (motion since the keyframe, ok); not ok means too few correspondences, and
+        the odometry motion is returned instead.
+        """
+        step, matches, error, ok = self.icp(points, self.kf_points, odom_from_kf,
+                                            self.iterations, self.max_dist, self.min_matches)
+        if not ok:
+            # Too little overlap to trust the partial estimate; keep the odometry motion.
+            self.get_logger().warn(
+                f'ICP had only {matches} correspondences; using odometry for this scan',
+                throttle_duration_sec=2.0)
+            return odom_from_kf, False
+        self.get_logger().debug(
+            f'ICP {matches} matches, mean error {error:.3f} m, correction '
+            f'dx={step[0] - odom_from_kf[0]:+.3f} dy={step[1] - odom_from_kf[1]:+.3f} '
+            f'dth={math.degrees(wrap_angle(step[2] - odom_from_kf[2])):+.2f} deg')
+        return step, True
 
     def publish(self, stamp):
         x, y, theta = self.last_pose

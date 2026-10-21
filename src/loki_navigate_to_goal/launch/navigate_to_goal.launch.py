@@ -7,12 +7,15 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     viz = LaunchConfiguration('viz', default='true')
+    # icp:=false makes vlio_node pass /odom through unchanged (wheel odometry only).
+    icp = LaunchConfiguration('icp', default='true')
 
     vlio_node = Node(
         package='loki_navigate_to_goal',
         executable='vlio_node',
         name='vlio_node',
         output='screen',
+        parameters=[{'use_icp': icp}],
     )
 
     go_to_goal_node = Node(
@@ -34,6 +37,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('viz', default_value='true'),
+        DeclareLaunchArgument('icp', default_value='true'),
 
         vlio_node,
         go_to_goal_node,

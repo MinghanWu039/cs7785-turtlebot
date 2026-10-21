@@ -62,11 +62,16 @@ On the robot, with bringup running, start `vlio_node` and the odometry server (l
 ros2 launch loki_navigate_to_goal odom_viz.launch.py
 ```
 `vlio_node` refines wheel odometry with lidar. For each `/scan` it starts from the
-odometry motion since the previous scan, runs 10 point-to-line ICP iterations against
-the previous scan (ignoring point pairs more than 0.5 m apart), and publishes the result
-on `/vlio_odom` at the scan rate (about 5 Hz). If too few points match, that scan uses
-the odometry step instead. Run `vlio_node` with `-p icp_method:=point_to_point` for the
-plain point-to-point variant. The server plots `/vlio_odom`; add
+odometry motion since the current keyframe scan, runs 10 point-to-line ICP iterations
+against that keyframe (ignoring point pairs more than 0.5 m apart), and publishes the
+result on `/vlio_odom` once per scan. A scan becomes the new keyframe once the robot has
+moved 0.2 m (`keyframe_dist`) or turned 10° (`keyframe_angle`) from the old one, or when
+too few points match, in which case that scan uses the odometry motion instead. Matching
+against a keyframe rather than the previous scan keeps lidar noise from accumulating: the
+LDS-02's beam angles jitter by about 0.3° per revolution, which scan-to-scan matching
+(`-p keyframe_dist:=0.0 -p keyframe_angle:=0.0`) adds up into drift even while the robot
+is still. Run `vlio_node` with `-p icp_method:=point_to_point` for the plain
+point-to-point variant, or launch with `icp:=false` to pass `/odom` through unchanged. The server plots `/vlio_odom`; add
 `odom_topic:=/odom` to the launch command to plot raw wheel odometry instead.
 
 The server reports poses relative to the first message it receives, so the run starts at
@@ -89,6 +94,22 @@ frames (5 s); older frames are drawn lighter. Map points outside the 10 m canvas
 dropped. Server parameters: `map_period` (0.5), `map_frames` (10), `map_size` (10.0),
 `scan_topic` (`/scan`).
 
+### Navigate to goal (Lab 4)
+
+On the robot, with bringup running:
+```bash
+ros2 launch loki_navigate_to_goal navigate_to_goal.launch.py   # viz:=false skips the viewer server
+```
+This starts `vlio_node`, `go_to_goal` and `odom_viz_server`. `go_to_goal` drives through
+`src/loki_navigate_to_goal/wayPoints.txt` (installed with the package; override with
+`-p waypoints_file:=<path>`), taking its first `/vlio_odom` pose as (0, 0) facing +x. On
+each pose, the state machine in `hybrid_control.py` chooses go-to-goal, avoid-obstacle, or
+boundary following from the lidar scan. A P controller then turns towards that state's
+direction and drives forward, slowing while the heading is off. The robot stops for 10 s
+(`goal_pause`) within 5 cm (`goal_tolerance`) of each waypoint, and stops if `/vlio_odom`
+goes quiet for 1 s. Watch it with
+`python3 scripts/odom_viz_client.py --waypoints src/loki_navigate_to_goal/wayPoints.txt`.
+
 ## Checks
 
 ```bash
@@ -105,7 +126,7 @@ ros2 topic echo /object               # only while an object is detected
 | `/object` | `geometry_msgs/Point` (x, y in [-1, 1], z = radius px) | `find_object` |
 | `/debug_viz` | `loki_object_follower_msgs/ImagePoint` (radius < 0 = no object) | `find_object` |
 | `/debug_mask` | `sensor_msgs/CompressedImage` (PNG foreground mask) | `find_object` |
-| `/cmd_vel` | `geometry_msgs/Twist` | `rotate_robot` |
+| `/cmd_vel` | `geometry_msgs/Twist` | `rotate_robot` or `go_to_goal` |
 | `/scan` | `sensor_msgs/LaserScan` (360 beams, 0 = no return) | LDS lidar |
 | `/odom` | `nav_msgs/Odometry` | TurtleBot3 bringup |
 | `/vlio_odom` | `nav_msgs/Odometry` (ICP-refined, ~5 Hz) | `vlio_node` |
