@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+
+    <RecoveryNode
+      number_of_retries="3"
+      name="NavigateWithCustomRecovery">
+
+      <!-- Primary navigation to the original goal -->
+      <PipelineSequence name="NavigateWithReplanning">
+
+        <RateController hz="1.0">
+          <ComputePathToPose
+            goal="{goal}"
+            path="{path}"
+            planner_id="GridBased"/>
+        </RateController>
+
+        <FollowPath
+          path="{path}"
+          controller_id="FollowPath"/>
+
+      </PipelineSequence>
+
+      <!-- Custom recovery when normal navigation fails -->
+      <Sequence name="CustomPythonRecovery">
+
+        <!-- Clear local costmap -->
+        <ClearEntireCostmap
+          name="ClearLocalCostmap"
+          service_name="/local_costmap/clear_entirely_local_costmap"/>
+
+        <!-- Request diversion waypoint from Python service -->
+        <BeepAndDivertBridge
+          recovery_pose="{recovery_pose}"/>
+
+        <!-- Plan to diversion waypoint, not original goal -->
+        <ComputePathToPose
+          goal="{recovery_pose}"
+          path="{recovery_path}"
+          planner_id="GridBased"/>
+
+        <!-- Execute diversion -->
+        <FollowPath
+          path="{recovery_path}"
+          controller_id="FollowPath"/>
+
+      </Sequence>
+
+    </RecoveryNode>
+
+  </BehaviorTree>
+</root>
