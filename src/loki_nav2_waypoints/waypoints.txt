@@ -1,0 +1,5 @@
+# Waypoints in the map frame, visited in order: x y [yaw_deg]
+# Without a yaw, the robot faces the direction it travelled from the previous waypoint.
+-0.3176 0.0812
+0.1244 0.9911
+1.5796 -0.1479
