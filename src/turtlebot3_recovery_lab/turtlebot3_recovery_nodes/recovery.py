@@ -35,7 +35,7 @@ SAMPLE_MAX_DISTANCE = 1.5  # m: and at most this far (well inside the lidar's ra
 SAMPLE_CLEARANCE = 0.25  # m: no scan point may be this close to the robot->point segment
 SCAN_MAX_AGE = 1.0  # s: ignore a scan older than this (time since it was received)
 
-FIXED_RECOVERY_POINT = (0.0, 0.0)  # map frame: try 3 (TODO: fill in)
+FIXED_RECOVERY_POINT = (-1.2, 0.8)  # map frame: try 3
 
 # Matches the action server's status topic: one latched message.
 LATCHED_QOS = QoSProfile(
